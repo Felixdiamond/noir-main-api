@@ -304,7 +304,17 @@ async def process_voice_command(
         response_text = response.text if hasattr(response, 'text') else str(response)
         
         try:
-            command_data = json.loads(response_text)
+            # Handle JSON wrapped in markdown code blocks
+            if "```json" in response_text:
+                # Extract JSON from markdown code blocks
+                start = response_text.find("```json") + 7
+                end = response_text.find("```", start)
+                json_text = response_text[start:end].strip()
+            else:
+                json_text = response_text.strip()
+            
+            command_data = json.loads(json_text)
+            logger.info(f"✅ Successfully parsed command: {command_data}")
         except json.JSONDecodeError:
             # Fallback if JSON parsing fails
             logger.warning(f"Failed to parse JSON response: {response_text}")
@@ -319,7 +329,7 @@ async def process_voice_command(
         
         return JSONResponse(content={
             "status": "success",
-            "transcription": command_data["command"],
+            "transcription": response_text,  # Raw response for debugging
             "intent": command_data["intent"],
             "result": result,
             "timestamp": datetime.utcnow().isoformat()
@@ -340,7 +350,7 @@ async def process_command_intent(command_data: Dict, user_id: str) -> Dict:
     if intent == "scene_description":
         return await handle_scene_description(user_id)
     elif intent == "object_finding":
-        object_name = parameters.get("object", "object")
+        object_name = parameters.get("object_name", parameters.get("object", "object"))
         return await handle_object_finding(user_id, object_name)
     elif intent == "location_save":
         location_name = parameters.get("location_name", "unnamed")
@@ -353,7 +363,13 @@ async def process_command_intent(command_data: Dict, user_id: str) -> Dict:
     elif intent == "depth_analysis":
         return await handle_depth_analysis(user_id)
     else:
-        return {"message": "I didn't understand that command. Please try again."}
+        error_message = "I didn't understand that command. Please try again."
+        audio_url = await text_to_speech(error_message)
+        return {
+            "message": error_message,
+            "audio_url": audio_url,
+            "type": "error"
+        }
 
 async def handle_scene_description(user_id: str) -> Dict:
     """Handle scene description request"""
@@ -550,6 +566,8 @@ async def handle_depth_analysis(user_id: str) -> Dict:
 async def text_to_speech(text: str) -> str:
     """Convert text to speech using Cloud TTS"""
     try:
+        logger.info(f"🗣️ Converting text to speech: '{text[:50]}...'")
+        
         synthesis_input = texttospeech.SynthesisInput(text=text)
         voice = texttospeech.VoiceSelectionParams(
             language_code="en-US",
@@ -562,15 +580,19 @@ async def text_to_speech(text: str) -> str:
             pitch=0.0
         )
         
+        logger.debug("📞 Calling Cloud TTS API...")
         response = tts_client.synthesize_speech(
             input=synthesis_input,
             voice=voice,
             audio_config=audio_config
         )
+        logger.debug(f"✅ TTS synthesis completed, audio size: {len(response.audio_content)} bytes")
         
         # Upload to Cloud Storage and return URL
         audio_id = str(uuid.uuid4())
         blob_name = f"audio/{audio_id}.mp3"
+        logger.debug(f"☁️ Uploading to Cloud Storage: {blob_name}")
+        
         bucket = storage_client.bucket(bucket_name)
         blob = bucket.blob(blob_name)
         blob.upload_from_string(response.audio_content, content_type='audio/mp3')
@@ -578,10 +600,12 @@ async def text_to_speech(text: str) -> str:
         # Make blob public (configure properly for production)
         blob.make_public()
         
-        return blob.public_url
+        public_url = blob.public_url
+        logger.info(f"🎵 TTS audio uploaded successfully: {public_url}")
+        return public_url
         
     except Exception as e:
-        logger.error(f"TTS error: {e}")
+        logger.error(f"❌ TTS error: {e}")
         return ""
 
 async def get_latest_frame(user_id: str):
