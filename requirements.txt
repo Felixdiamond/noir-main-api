@@ -1,0 +1,35 @@
+# Project Noir Main API Service Requirements
+
+# FastAPI framework
+fastapi
+uvicorn[standard]
+
+# Google Cloud services
+google-cloud-aiplatform
+google-cloud-texttospeech
+google-cloud-speech
+google-cloud-firestore
+google-cloud-storage
+
+# Async HTTP client
+httpx
+aiofiles
+
+# Image processing
+Pillow
+opencv-python-headless
+numpy
+
+pydantic
+pydantic-settings
+
+# Audio processing
+python-jose[cryptography]
+
+# Utilities
+python-dotenv
+structlog
+
+# Production server
+gunicorn
+python-multipart
