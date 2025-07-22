@@ -128,6 +128,22 @@ class ConnectionManager:
         
         return sent_count
     
+    async def broadcast(self, message: Dict, exclude_connection: str = None) -> int:
+        """Broadcast message to all active connections"""
+        sent_count = 0
+        
+        connection_ids = list(self.active_connections.keys())  # Copy to avoid modification during iteration
+        
+        for connection_id in connection_ids:
+            if connection_id != exclude_connection:
+                if await self.send_to_connection(connection_id, message):
+                    sent_count += 1
+        
+        if sent_count > 0:
+            logger.info(f"📡 Broadcast message to {sent_count} connections")
+        
+        return sent_count
+    
     async def broadcast_to_room(self, room_id: str, message: Dict, exclude_connection: str = None) -> int:
         """Broadcast message to all connections in a room"""
         sent_count = 0

@@ -45,7 +45,7 @@ import google.genai as genai
 # Internal imports
 from models import *
 from location_memory import LocationMemoryManager
-from websocket_manager import WebSocketManager
+from websocket_manager import connection_manager as websocket_manager
 from audio_processor import CloudAudioProcessor
 from utils import setup_logging, get_env_var
 
@@ -72,7 +72,7 @@ logger = setup_logging()
 
 # Initialize global services
 location_manager = LocationMemoryManager()
-websocket_manager = WebSocketManager()
+# websocket_manager is imported as connection_manager from websocket_manager module
 audio_processor = CloudAudioProcessor()
 
 # Helper function for creating multimodal content
@@ -376,7 +376,13 @@ async def handle_scene_description(user_id: str) -> Dict:
     # Get latest frame from storage
     latest_frame = await get_latest_frame(user_id)
     if not latest_frame:
-        return {"message": "No recent camera frame available for analysis."}
+        error_message = "No recent camera frame available for analysis."
+        audio_response = await text_to_speech(error_message)
+        return {
+            "message": error_message,
+            "audio_url": audio_response,
+            "type": "scene_description"
+        }
     
     # Run YOLO object detection
     async with httpx.AsyncClient(timeout=30.0) as client_http:
@@ -448,7 +454,13 @@ async def handle_location_save(user_id: str, location_name: str) -> Dict:
     """Save current location to memory"""
     current_location = location_manager.get_current_location(user_id)
     if not current_location:
-        return {"message": "GPS location not available. Please try again."}
+        error_message = "GPS location not available. Please try again."
+        audio_response = await text_to_speech(error_message)
+        return {
+            "message": error_message,
+            "audio_url": audio_response,
+            "type": "location_save"
+        }
     
     success = location_manager.save_location(
         user_id=user_id,
@@ -502,7 +514,13 @@ async def handle_text_reading(user_id: str) -> Dict:
     # Get latest frame
     latest_frame = await get_latest_frame(user_id)
     if not latest_frame:
-        return {"message": "No recent camera frame available for text reading."}
+        error_message = "No recent camera frame available for text reading."
+        audio_response = await text_to_speech(error_message)
+        return {
+            "message": error_message,
+            "audio_url": audio_response,
+            "type": "text_reading"
+        }
     
     # Analyze with Gemini for OCR using proper google-genai format
     prompt = """
@@ -710,14 +728,26 @@ async def send_to_yolo_service(image_bytes: bytes, session_id: str, gps_location
 @app.websocket("/ws/{user_id}")
 async def websocket_endpoint(websocket: WebSocket, user_id: str):
     """WebSocket endpoint for real-time communication"""
-    await websocket_manager.connect(websocket, user_id)
+    # Generate unique connection ID
+    connection_id = f"ws_{user_id}_{int(time.time())}"
+    
+    # Connect to websocket manager
+    connected = await websocket_manager.connect(websocket, connection_id, user_id, "websocket")
+    
+    if not connected:
+        logger.error(f"Failed to establish WebSocket connection for user {user_id}")
+        return
+    
     try:
         while True:
             data = await websocket.receive_text()
             # Handle incoming WebSocket messages
-            await websocket_manager.handle_message(user_id, data)
+            await websocket_manager.handle_message(connection_id, data)
     except WebSocketDisconnect:
-        websocket_manager.disconnect(user_id)
+        websocket_manager.disconnect(connection_id)
+    except Exception as e:
+        logger.error(f"WebSocket error for user {user_id}: {e}")
+        websocket_manager.disconnect(connection_id)
 
 @app.get("/locations/{user_id}")
 async def get_user_locations(user_id: str):
