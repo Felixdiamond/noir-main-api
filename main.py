@@ -4,7 +4,7 @@ Central orchestration service for all Project Noir cloud features
 
 Updated to use google-genai library with proper Vertex AI procedures:
 - Client initialization: genai.Client(vertexai=True, project=..., location=...)
-- Content creation: genai.Part.from_data() for audio/image parts
+- Content creation: inline_data format for audio/image content
 - API calls: client.models.generate_content(model=..., contents=...)
 - Model: gemini-2.5-pro (SOTA with enhanced thinking and reasoning)
 - Proper error handling and environment validation
@@ -74,6 +74,17 @@ logger = setup_logging()
 location_manager = LocationMemoryManager()
 websocket_manager = WebSocketManager()
 audio_processor = CloudAudioProcessor()
+
+# Helper function for creating multimodal content
+def create_inline_data_content(data: bytes, mime_type: str) -> Dict:
+    """Create inline data content for Gemini API"""
+    data_base64 = base64.b64encode(data).decode('utf-8')
+    return {
+        "inline_data": {
+            "mime_type": mime_type,
+            "data": data_base64
+        }
+    }
 
 # Configure Vertex AI (Gemini) - Updated for google-genai library
 GCP_PROJECT_ID = get_env_var("GCP_PROJECT_ID")
@@ -174,7 +185,6 @@ async def process_frame(request_data: dict):
         base64_image = request_data.get("image_data", "")
         
         # Decode base64 image
-        import base64
         image_bytes = base64.b64decode(base64_image)
         
         # Generate unique session ID
@@ -229,7 +239,6 @@ async def get_latest_frame_endpoint(user_id: str = "default"):
         
         if frame_data:
             # Convert to base64 for JSON response
-            import base64
             image_base64 = base64.b64encode(frame_data).decode('utf-8')
             
             return {
@@ -272,8 +281,8 @@ async def process_voice_command(
         # Read audio data
         audio_bytes = await audio.read()
         
-        # Create audio part using proper google-genai format
-        audio_part = genai.Part.from_data(data=audio_bytes, mime_type="audio/wav")
+        # Create audio content using helper function
+        audio_content = create_inline_data_content(audio_bytes, "audio/wav")
         
         prompt = """
         You are Noir, an AI assistant for visually impaired individuals. 
@@ -285,10 +294,10 @@ async def process_voice_command(
         Format as JSON: {"command": "...", "intent": "...", "parameters": {...}}
         """
         
-        # Use the client to generate content
+        # Use the client to generate content with inline audio data
         response = client.models.generate_content(
             model=MODEL_NAME,
-            contents=[prompt, audio_part]
+            contents=[prompt, audio_content]
         )
         
         # Extract text from response
@@ -379,11 +388,12 @@ async def handle_scene_description(user_id: str) -> Dict:
         max_d = depth_data.get("max_depth", 0)
         context_lines.append(f"Depth range: {min_d:.1f}m to {max_d:.1f}m")
     full_prompt = f"{system_prompt}\n\nContext:\n" + "\n".join(context_lines)
-    # Create image part and generate response
-    image_part = genai.Part.from_data(data=latest_frame, mime_type="image/jpeg")
+    # Create image content and generate response
+    image_content = create_inline_data_content(latest_frame, "image/jpeg")
+    
     response = client.models.generate_content(
         model=MODEL_NAME,
-        contents=[full_prompt, image_part]
+        contents=[full_prompt, image_content]
     )
     
     # Extract text from response
@@ -488,13 +498,13 @@ async def handle_text_reading(user_id: str) -> Dict:
     Be concise and helpful.
     """
     
-    # Create image part for the frame
-    image_part = genai.Part.from_data(data=latest_frame, mime_type="image/jpeg")
+    # Create image content for the frame
+    image_content = create_inline_data_content(latest_frame, "image/jpeg")
     
     # Use the client to generate content
     response = client.models.generate_content(
         model=MODEL_NAME,
-        contents=[prompt, image_part]
+        contents=[prompt, image_content]
     )
     
     # Extract text from response
