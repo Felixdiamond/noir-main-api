@@ -41,3 +41,4 @@ langchain-mcp-adapters
 
 # Google Maps
 googlemaps
+geopy
