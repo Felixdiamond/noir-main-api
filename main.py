@@ -55,24 +55,18 @@ from mcp_server import mcp_server
 
 MODEL_NAME = "gemini-2.5-pro"  # Upgraded Model
 
+# Rename the original lifespan function to app_lifespan
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def app_lifespan(app: FastAPI):
     # Application startup logic
     logger.info("🚀 Project Noir Cloud API starting up...")
-    
-    # Validate environment variables and test connections
-    # (This logic is moved from the old startup_event)
     try:
         assert GCP_PROJECT_ID, "GCP_PROJECT_ID environment variable not set"
         assert GCP_REGION, "GCP_REGION environment variable not set"
         assert bucket_name, "CLOUD_STORAGE_BUCKET environment variable not set"
         logger.info("✅ Environment variables validated")
-
-        # Test Gemini connection
         client.models.generate_content(model=MODEL_NAME, contents="Test connection")
         logger.info(f"✅ Gemini {MODEL_NAME} connected successfully")
-
-        # Test Cloud TTS
         tts_client.synthesize_speech(
             input=texttospeech.SynthesisInput(text="Test"),
             voice=texttospeech.VoiceSelectionParams(language_code="en-US", name="en-US-Neural2-F"),
@@ -81,18 +75,9 @@ async def lifespan(app: FastAPI):
         logger.info("✅ Cloud TTS connected successfully")
     except Exception as e:
         logger.error(f"❌ Startup check failed: {e}")
-        # Decide if you want to exit here or continue with partial functionality
-        # For now, we'll log the error and continue.
-    
-    # Start background tasks
     cleanup_task = asyncio.create_task(periodic_frame_cleanup())
     logger.info("🧹 Frame buffer cleanup task started")
-
-    # This is the crucial part for combining lifespans
-    async with mcp_server.lifespan(app):
-        yield
-
-    # Application shutdown logic
+    yield
     logger.info("🛑 Project Noir Cloud API shutting down...")
     cleanup_task.cancel()
     try:
@@ -100,13 +85,22 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         logger.info("🧹 Frame buffer cleanup task cancelled.")
 
+# Create the MCP ASGI app
+mcp_app = mcp_server.http_app(path="/mcp")
 
-# Initialize FastAPI app with the new lifespan manager
+# Combine both lifespans
+@asynccontextmanager
+async def combined_lifespan(app: FastAPI):
+    async with app_lifespan(app):
+        async with mcp_app.lifespan(app):
+            yield
+
+# Initialize FastAPI app with the combined lifespan manager
 app = FastAPI(
     title="Project Noir Cloud API",
     description="AI-Powered Independence for the Visually Impaired - Cloud Edition",
     version="1.0.0",
-    lifespan=lifespan
+    lifespan=combined_lifespan
 )
 
 # Configure CORS
@@ -119,7 +113,7 @@ app.add_middleware(
 )
 
 # Mount the MCP server as a sub-application
-app.mount("/mcp", mcp_server.app)
+app.mount("/mcp", mcp_app)
 
 
 # Initialize logging
