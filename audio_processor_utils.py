@@ -58,13 +58,13 @@ class AudioProcessor:
             self.tts_client = None
             self.speech_client = None
     
-    async def text_to_speech(self, text: str, voice_name: str = None) -> Optional[bytes]:
+    async def text_to_speech(self, text: str, voice_name: str = None) -> bytes:
         """Convert text to speech audio"""
         try:
             if not self.tts_client:
                 logger.error("TTS client not available")
-                return None
-            
+                raise RuntimeError("TTS client not initialized")
+
             # Use custom voice if provided
             voice_config = self.voice
             if voice_name:
@@ -73,49 +73,49 @@ class AudioProcessor:
                     name=voice_name,
                     ssml_gender=tts.SsmlVoiceGender.FEMALE
                 )
-            
+
             # Create synthesis input
             synthesis_input = tts.SynthesisInput(text=text)
-            
+
             # Generate speech
             response = self.tts_client.synthesize_speech(
                 input=synthesis_input,
                 voice=voice_config,
                 audio_config=self.audio_config
             )
-            
+
             logger.info(f"🔊 Generated TTS audio for text: '{text[:50]}...'")
             return response.audio_content
-            
+
         except Exception as e:
             logger.error(f"Error in text-to-speech: {e}")
-            return None
+            raise RuntimeError(f"Text-to-speech failed: {e}")
     
-    async def speech_to_text(self, audio_data: bytes) -> Optional[Dict]:
+    async def speech_to_text(self, audio_data: bytes) -> Dict:
         """Convert speech audio to text"""
         try:
             if not self.speech_client:
                 logger.error("Speech client not available")
-                return None
-            
+                raise RuntimeError("Speech client not initialized")
+
             # Create audio object
             audio = speech.RecognitionAudio(content=audio_data)
-            
+
             # Perform speech recognition
             response = self.speech_client.recognize(
                 config=self.speech_config,
                 audio=audio
             )
-            
+
             if not response.results:
                 logger.warning("No speech recognized")
-                return None
-            
+                raise RuntimeError("No speech recognized")
+
             # Get the best result
             result = response.results[0]
             transcript = result.alternatives[0].transcript
             confidence = result.alternatives[0].confidence
-            
+
             # Extract word timings
             word_info = []
             if hasattr(result.alternatives[0], 'words'):
@@ -125,58 +125,59 @@ class AudioProcessor:
                         "start_time": word.start_time.total_seconds(),
                         "end_time": word.end_time.total_seconds()
                     })
-            
+
             logger.info(f"🎤 Recognized speech: '{transcript}' (confidence: {confidence:.2f})")
-            
+
             return {
                 "transcript": transcript,
                 "confidence": confidence,
                 "words": word_info
             }
-            
+
         except Exception as e:
             logger.error(f"Error in speech-to-text: {e}")
-            return None
+            raise RuntimeError(f"Speech-to-text failed: {e}")
     
     async def streaming_speech_to_text(self, audio_stream):
         """Handle streaming speech recognition"""
         try:
             if not self.speech_client:
                 logger.error("Speech client not available")
-                return
-            
+                raise RuntimeError("Speech client not initialized")
+
             # Configure streaming recognition
             streaming_config = speech.StreamingRecognitionConfig(
                 config=self.speech_config,
                 interim_results=True,
                 single_utterance=False
             )
-            
+
             # Create streaming recognition requests
             def request_generator():
                 yield speech.StreamingRecognizeRequest(
                     streaming_config=streaming_config
                 )
-                
+
                 for chunk in audio_stream:
                     yield speech.StreamingRecognizeRequest(audio_content=chunk)
-            
+
             # Start streaming recognition
             responses = self.speech_client.streaming_recognize(request_generator())
-            
+
             for response in responses:
                 for result in response.results:
                     transcript = result.alternatives[0].transcript
                     is_final = result.is_final
-                    
+
                     yield {
                         "transcript": transcript,
                         "is_final": is_final,
                         "confidence": result.alternatives[0].confidence if is_final else 0.0
                     }
-                    
+
         except Exception as e:
             logger.error(f"Error in streaming speech recognition: {e}")
+            raise RuntimeError(f"Streaming speech recognition failed: {e}")
     
     def create_ssml_text(self, text: str, emphasis: str = None, 
                         pause_before: float = 0, pause_after: float = 0) -> str:
@@ -197,7 +198,7 @@ class AudioProcessor:
         ssml += '</speak>'
         return ssml
     
-    async def generate_navigation_audio(self, guidance_text: str) -> Optional[bytes]:
+    async def generate_navigation_audio(self, guidance_text: str) -> bytes:
         """Generate specially formatted audio for navigation guidance"""
         try:
             # Add SSML for better navigation audio
@@ -207,10 +208,10 @@ class AudioProcessor:
                 pause_before=0.2,
                 pause_after=0.3
             )
-            
+
             # Use SSML input instead of plain text
             synthesis_input = tts.SynthesisInput(ssml=ssml_text)
-            
+
             # Generate with navigation-optimized settings
             nav_audio_config = tts.AudioConfig(
                 audio_encoding=tts.AudioEncoding.MP3,
@@ -218,21 +219,21 @@ class AudioProcessor:
                 pitch=2.0,  # Slightly higher pitch for clarity
                 volume_gain_db=2.0  # Slightly louder
             )
-            
+
             response = self.tts_client.synthesize_speech(
                 input=synthesis_input,
                 voice=self.voice,
                 audio_config=nav_audio_config
             )
-            
+
             logger.info(f"🧭 Generated navigation audio: '{guidance_text}'")
             return response.audio_content
-            
+
         except Exception as e:
             logger.error(f"Error generating navigation audio: {e}")
-            return None
+            raise RuntimeError(f"Navigation audio generation failed: {e}")
     
-    async def generate_alert_audio(self, alert_text: str, urgency: str = "medium") -> Optional[bytes]:
+    async def generate_alert_audio(self, alert_text: str, urgency: str = "medium") -> bytes:
         """Generate alert audio with appropriate urgency"""
         try:
             # Configure based on urgency
@@ -240,7 +241,7 @@ class AudioProcessor:
             speaking_rate = 1.0
             pitch = 0.0
             volume_gain = 0.0
-            
+
             if urgency == "high":
                 emphasis_level = "strong"
                 speaking_rate = 1.2
@@ -251,7 +252,7 @@ class AudioProcessor:
                 speaking_rate = 0.9
                 pitch = -2.0
                 volume_gain = -2.0
-            
+
             # Create SSML with urgency formatting
             ssml_text = self.create_ssml_text(
                 alert_text,
@@ -259,28 +260,28 @@ class AudioProcessor:
                 pause_before=0.1,
                 pause_after=0.2
             )
-            
+
             synthesis_input = tts.SynthesisInput(ssml=ssml_text)
-            
+
             alert_audio_config = tts.AudioConfig(
                 audio_encoding=tts.AudioEncoding.MP3,
                 speaking_rate=speaking_rate,
                 pitch=pitch,
                 volume_gain_db=volume_gain
             )
-            
+
             response = self.tts_client.synthesize_speech(
                 input=synthesis_input,
                 voice=self.voice,
                 audio_config=alert_audio_config
             )
-            
+
             logger.info(f"🚨 Generated {urgency} urgency alert: '{alert_text}'")
             return response.audio_content
-            
+
         except Exception as e:
             logger.error(f"Error generating alert audio: {e}")
-            return None
+            raise RuntimeError(f"Alert audio generation failed: {e}")
     
     def process_voice_command(self, transcript: str) -> Dict:
         """Process voice command and extract intent"""

@@ -50,7 +50,7 @@ from audio_processor import CloudAudioProcessor
 from utils import setup_logging, get_env_var
 from frame_buffer import frame_buffer
 
-MODEL_NAME = "gemini-2.5-pro"  # SOTA model with enhanced thinking and reasoning
+MODEL_NAME = "gemini-2.5-flash"  # Fast, cost-effective model
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -223,8 +223,8 @@ async def process_frame(request_data: dict):
         # Get latest GPS data from location manager (from mobile app)
         current_location = location_manager.get_current_location(user_id)
 
-        # Send to YOLO detection service (async)
-        asyncio.create_task(send_to_yolo_service(image_bytes, session_id, current_location))
+
+        # No longer send to YOLO/depth here; only on visual intent
 
         # Broadcast to connected WebSocket clients
         await websocket_manager.broadcast({
@@ -269,7 +269,7 @@ async def process_voice_command(
     user_id: str = Form(default="default")
 ):
     """
-    Process voice command using Gemini 2.5 Pro audio understanding
+    Process voice command using Gemini 2.5 Flash audio understanding
     """
     try:
         # Read audio data
@@ -286,6 +286,7 @@ async def process_voice_command(
         3. Any specific parameters (object name, location name, etc.)
         
         Format as JSON: {"command": "...", "intent": "...", "parameters": {...}}
+        (Gemini 2.5 Flash model)
         """
         
         # Use the client to generate content with inline audio data
@@ -370,10 +371,11 @@ async def handle_scene_description(user_id: str) -> Dict:
     # Get all frames from memory buffer (real-time ONLY)
     try:
         buffer_status = await frame_buffer.get_buffer_status(user_id)
-        frame_ids = buffer_status["frames"]
+        frame_infos = buffer_status["frames"]
         frames = []
-        for frame_id in frame_ids:
-            frame = await frame_buffer.get_frame(user_id, frame_id)
+        for info in frame_infos:
+            idx = info["index"]
+            frame = await frame_buffer.get_frame_by_index(user_id, idx)
             if frame:
                 frames.append(frame)
     except Exception as e:
@@ -391,75 +393,66 @@ async def handle_scene_description(user_id: str) -> Dict:
             "error": "no_frame_available"
         }
 
-    # Use the most recent frame for YOLO and depth, but pass all frames to Gemini
-    latest_frame = frames[-1]
-
-    # Run YOLO and Depth estimation in parallel (major speedup)
+    # Use the 3 most recent frames for YOLO and depth, and pass all to Gemini
+    frames_to_use = frames[-3:] if len(frames) >= 3 else frames
     start_time = time.time()
 
-    async def run_yolo():
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client_http:
-                files = {"file": ("image.jpg", latest_frame, "image/jpeg")}
-                yolo_resp = await client_http.post(f"{YOLO_SERVICE_URL}/detect", files=files)
-                yolo_resp.raise_for_status()
-                return yolo_resp.json()
-        except Exception as e:
-            logger.error(f"❌ YOLO detection failed: {e}")
-            return {"detections": []}
+    # Try to get the user's original prompt from context (if available)
+    user_prompt = None
+    # Model now uses gemini-2.5-flash for scene description
+    import contextvars
+    try:
+        user_prompt = contextvars.ContextVar("user_prompt").get()
+    except Exception:
+        user_prompt = None
 
-    async def run_depth():
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client_http:
-                files = {"file": ("image.jpg", latest_frame, "image/jpeg")}
-                depth_resp = await client_http.post(f"{DEPTH_SERVICE_URL}/estimate-depth", files=files, params={"return_colorized": True})
-                depth_resp.raise_for_status()
-                return depth_resp.json()
-        except Exception as e:
-            logger.error(f"❌ Depth estimation failed: {e}")
-            return {}
+    # Run YOLO and Depth estimation for all frames in parallel
+    async def run_yolo_depth(frame):
+        async with httpx.AsyncClient(timeout=30.0) as client_http:
+            yolo_task = client_http.post(f"{YOLO_SERVICE_URL}/detect", files={"file": ("image.jpg", frame, "image/jpeg")})
+            depth_task = client_http.post(f"{DEPTH_SERVICE_URL}/estimate-depth", files={"file": ("image.jpg", frame, "image/jpeg")}, params={"return_colorized": True})
+            yolo_resp, depth_resp = await asyncio.gather(yolo_task, depth_task)
+            yolo_data = yolo_resp.json() if yolo_resp.status_code == 200 else {"detections": []}
+            depth_data = depth_resp.json() if depth_resp.status_code == 200 else {}
+            return yolo_data, depth_data
 
-    # Execute both services in parallel
-    yolo_data, depth_data = await asyncio.gather(run_yolo(), run_depth())
+    results = await asyncio.gather(*(run_yolo_depth(frame) for frame in frames_to_use))
 
-    processing_time = time.time() - start_time
-    logger.info(f"⚡ Parallel processing completed in {processing_time:.2f}s")
+    # Aggregate objects and depth info
+    objects = []
+    min_depths = []
+    max_depths = []
+    for yolo_data, depth_data in results:
+        objects.extend([d.get("class_name") for d in yolo_data.get("detections", [])])
+        if depth_data:
+            min_depths.append(depth_data.get("min_depth", 0))
+            max_depths.append(depth_data.get("max_depth", 0))
 
-    # Extract objects
-    objects = [d.get("class_name") for d in yolo_data.get("detections", [])]
-
-    # Build Gemini prompt with context
+    # Dynamic system prompt
     system_prompt = (
         "You are Noir, an AI assistant for visually impaired users. "
-        "Provide a concise scene description with spatial layout, objects and distances, and navigation cues."
+        "Analyze the user's request and adapt your response style accordingly. "
+        "Always be concise, helpful, and context-aware."
     )
     context_lines = []
+    if user_prompt:
+        context_lines.append(f"User prompt: {user_prompt}")
     if objects:
-        context_lines.append(f"Detected objects: {', '.join(objects[:5])}")
-    if depth_data:
-        min_d = depth_data.get("min_depth", 0)
-        max_d = depth_data.get("max_depth", 0)
-        context_lines.append(f"Depth range: {min_d:.1f}m to {max_d:.1f}m")
+        context_lines.append(f"Detected objects: {', '.join(set(objects[:5]))}")
+    if min_depths and max_depths:
+        context_lines.append(f"Depth range: {min(min_depths):.1f}m to {max(max_depths):.1f}m")
     full_prompt = f"{system_prompt}\n\nContext:\n" + "\n".join(context_lines)
 
-    # Create image content for all frames
-    image_contents = [create_inline_data_content(frame, "image/jpeg") for frame in frames]
-
-    # Pass all images to Gemini
+    image_contents = [create_inline_data_content(frame, "image/jpeg") for frame in frames_to_use]
     response = client.models.generate_content(
         model=MODEL_NAME,
         contents=[full_prompt] + image_contents
     )
 
-    # Extract text from response
     response_text = response.text if hasattr(response, 'text') else str(response)
-
-    # Convert to speech (async in background to not block response)
     audio_response = await text_to_speech(response_text)
-
     total_time = time.time() - start_time
     logger.info(f"🎯 Complete scene description in {total_time:.2f}s")
-
     return {
         "message": response_text,
         "audio_url": audio_response,
