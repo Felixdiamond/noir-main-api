@@ -37,6 +37,7 @@ import io
 import base64
 import httpx
 import math
+from contextlib import asynccontextmanager
 
 # Google Cloud imports
 from google.cloud import storage
@@ -49,16 +50,63 @@ from location_memory import LocationMemoryManager
 from websocket_manager import connection_manager as websocket_manager
 from audio_processor import CloudAudioProcessor
 from utils import setup_logging, get_env_var
-from frame_buffer import frame_buffer
+from frame_buffer import frame_buffer, periodic_frame_cleanup
 from mcp_server import mcp_server
 
-MODEL_NAME = "gemini-1.5-pro-preview-0409"  # Upgraded Model
+MODEL_NAME = "gemini-2.5-pro"  # Upgraded Model
 
-# Initialize FastAPI app
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Application startup logic
+    logger.info("🚀 Project Noir Cloud API starting up...")
+    
+    # Validate environment variables and test connections
+    # (This logic is moved from the old startup_event)
+    try:
+        assert GCP_PROJECT_ID, "GCP_PROJECT_ID environment variable not set"
+        assert GCP_REGION, "GCP_REGION environment variable not set"
+        assert bucket_name, "CLOUD_STORAGE_BUCKET environment variable not set"
+        logger.info("✅ Environment variables validated")
+
+        # Test Gemini connection
+        client.models.generate_content(model=MODEL_NAME, contents="Test connection")
+        logger.info(f"✅ Gemini {MODEL_NAME} connected successfully")
+
+        # Test Cloud TTS
+        tts_client.synthesize_speech(
+            input=texttospeech.SynthesisInput(text="Test"),
+            voice=texttospeech.VoiceSelectionParams(language_code="en-US", name="en-US-Neural2-F"),
+            audio_config=texttospeech.AudioConfig(audio_encoding=texttospeech.AudioEncoding.MP3)
+        )
+        logger.info("✅ Cloud TTS connected successfully")
+    except Exception as e:
+        logger.error(f"❌ Startup check failed: {e}")
+        # Decide if you want to exit here or continue with partial functionality
+        # For now, we'll log the error and continue.
+    
+    # Start background tasks
+    cleanup_task = asyncio.create_task(periodic_frame_cleanup())
+    logger.info("🧹 Frame buffer cleanup task started")
+
+    # This is the crucial part for combining lifespans
+    async with mcp_server.lifespan(app):
+        yield
+
+    # Application shutdown logic
+    logger.info("🛑 Project Noir Cloud API shutting down...")
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        logger.info("🧹 Frame buffer cleanup task cancelled.")
+
+
+# Initialize FastAPI app with the new lifespan manager
 app = FastAPI(
     title="Project Noir Cloud API",
     description="AI-Powered Independence for the Visually Impaired - Cloud Edition",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # Configure CORS
@@ -70,8 +118,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount the MCP server router
-app.include_router(mcp_server.router, prefix="/mcp")
+# Mount the MCP server as a sub-application
+app.mount("/mcp", mcp_server.app)
 
 
 # Initialize logging
@@ -125,57 +173,7 @@ YOLO_SERVICE_URL = get_env_var("YOLO_SERVICE_URL", default="https://noir-yolo-ap
 DEPTH_SERVICE_URL = get_env_var("DEPTH_SERVICE_URL", default="http://depth-estimation:8000")
 
 
-@app.on_event("startup")
-async def startup_event():
-    """Initialize services on startup"""
-    logger.info("🚀 Project Noir Cloud API starting up...")
-    
-    # Validate environment variables
-    try:
-        assert GCP_PROJECT_ID, "GCP_PROJECT_ID environment variable not set"
-        assert GCP_REGION, "GCP_REGION environment variable not set"
-        assert bucket_name, "CLOUD_STORAGE_BUCKET environment variable not set"
-        logger.info("✅ Environment variables validated")
-    except AssertionError as e:
-        logger.error(f"❌ Environment validation failed: {e}")
-        return
-    
-    # Test Gemini connection
-    try:
-        test_response = client.models.generate_content(
-            model=MODEL_NAME,
-            contents="Test connection"
-        )
-        logger.info(f"✅ Gemini {MODEL_NAME} connected successfully")
-    except Exception as e:
-        logger.error(f"❌ Gemini connection failed: {e}")
-        logger.error("Please ensure:")
-        logger.error("1. Vertex AI API is enabled in your GCP project")
-        logger.error("2. Service account has Vertex AI User role")
-        logger.error("3. GOOGLE_APPLICATION_CREDENTIALS is set correctly")
-    
-    # Test Cloud TTS
-    try:
-        test_synthesis = tts_client.synthesize_speech(
-            input=texttospeech.SynthesisInput(text="Test"),
-            voice=texttospeech.VoiceSelectionParams(
-                language_code="en-US",
-                name="en-US-Neural2-F"
-            ),
-            audio_config=texttospeech.AudioConfig(
-                audio_encoding=texttospeech.AudioEncoding.MP3
-            )
-        )
-        logger.info("✅ Cloud TTS connected successfully")
-    except Exception as e:
-        logger.error(f"❌ Cloud TTS connection failed: {e}")
-    
-    # Start frame buffer cleanup task
-    asyncio.create_task(periodic_frame_cleanup())
-    logger.info("🧹 Frame buffer cleanup task started")
-
-    logger.info("🎯 Project Noir Cloud API ready for real-time requests")
-
+# The old @app.on_event("startup") is no longer needed and will be removed.
 
 @app.get("/")
 async def root():

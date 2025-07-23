@@ -1,4 +1,4 @@
-from mcp.server.fastmcp import FastMCP
+from fastmcp import FastMCP
 from typing import Dict, List
 import logging
 from logic import (
@@ -14,7 +14,10 @@ from logic import (
 
 logger = logging.getLogger(__name__)
 
-mcp_server = FastMCP("ProjectNoir")
+mcp_server = FastMCP(
+    name="ProjectNoir",
+    instructions="A suite of tools to help visually impaired users perceive and navigate their environment."
+)
 
 @mcp_server.tool()
 async def get_camera_frames(user_id: str) -> Dict:
@@ -37,7 +40,7 @@ async def get_camera_frames(user_id: str) -> Dict:
 @mcp_server.tool()
 async def analyze_scene_with_vision_model(user_id: str, frames: List[str], prompt: str) -> Dict:
     """
-    Analyzes a list of image frames using the Gemini 2.0 Flash vision model.
+    Analyzes a list of image frames using the Gemini 2.5 Pro vision model.
     
     This is a powerful and general-purpose vision tool. Use it for:
     - General scene understanding and description.

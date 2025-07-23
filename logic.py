@@ -109,8 +109,19 @@ async def get_current_location(user_id: str) -> Dict:
         return {"location": location}
     return {"error": "Current location not available."}
 
-async def save_location(user_id: str, location_name: str, latitude: float, longitude: float) -> Dict:
-    """Saves a location with given coordinates."""
+async def save_location(user_id: str, location_name: str) -> Dict:
+    """Saves the user's current location with a given name."""
+    current_location_data = await get_current_location(user_id)
+    if "error" in current_location_data:
+        return current_location_data
+
+    location = current_location_data.get("location")
+    if not location or "latitude" not in location or "longitude" not in location:
+        return {"error": "Could not retrieve valid current location to save."}
+
+    latitude = location["latitude"]
+    longitude = location["longitude"]
+    
     success = location_manager.save_location(user_id, location_name, latitude, longitude)
     if success:
         return {"status": "success", "message": f"Location '{location_name}' saved."}
@@ -133,8 +144,8 @@ async def navigate_to_location(user_id: str, destination_name: str) -> Dict:
         if "error" in current_location:
             return current_location
 
-        origin_lat = current_location["data"]["latitude"]
-        origin_lon = current_location["data"]["longitude"]
+        origin_lat = current_location["location"]["latitude"]
+        origin_lon = current_location["location"]["longitude"]
         origin = f"{origin_lat},{origin_lon}"
 
         logger.info(f"[CORE LOGIC] Requesting navigation from {origin} to {destination_name}")
