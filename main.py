@@ -53,6 +53,8 @@ from utils import setup_logging, get_env_var
 from frame_buffer import frame_buffer, periodic_frame_cleanup
 from mcp_server import mcp_server
 
+from fastapi import Request
+
 MODEL_NAME = "gemini-2.5-pro"  # Upgraded Model
 
 # Rename the original lifespan function to app_lifespan
@@ -86,7 +88,7 @@ async def app_lifespan(app: FastAPI):
         logger.info("🧹 Frame buffer cleanup task cancelled.")
 
 # Create the MCP ASGI app
-mcp_app = mcp_server.http_app(path="/mcp")
+mcp_app = mcp_server.http_app(path="/")
 
 # Combine both lifespans
 @asynccontextmanager
@@ -102,6 +104,17 @@ app = FastAPI(
     version="1.0.0",
     lifespan=combined_lifespan
 )
+
+@app.middleware("http")
+async def log_all_requests(request: Request, call_next):
+    logger.info(f"--- Incoming Request: {request.method} {request.url} ---")
+    try:
+        response = await call_next(request)
+        logger.info(f"--- Response Status: {response.status_code} for {request.method} {request.url} ---")
+        return response
+    except Exception as e:
+        logger.error(f"--- Exception during request {request.method} {request.url}: {e} ---")
+        raise # Re-raise the exception after logging
 
 # Configure CORS
 app.add_middleware(
@@ -317,6 +330,9 @@ async def health_check():
         },
         "timestamp": datetime.utcnow().isoformat()
     }
+
+for route in app.routes:
+    print(f"ROUTE: {route.path}")
 
 if __name__ == "__main__":
     import uvicorn
