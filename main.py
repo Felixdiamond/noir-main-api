@@ -52,8 +52,6 @@ from utils import setup_logging, get_env_var
 from frame_buffer import frame_buffer
 from logic import (
     # We no longer need the high-level handlers here
-    # Proximity monitor is still a background task
-    proximity_monitor,
 )
 from mcp_server import mcp_server
 
@@ -178,10 +176,6 @@ async def startup_event():
     # Start frame buffer cleanup task
     asyncio.create_task(periodic_frame_cleanup())
     logger.info("🧹 Frame buffer cleanup task started")
-
-    # Start proximity monitor for all users (for demo, just 'default')
-    asyncio.create_task(proximity_monitor("default"))
-    logger.info("🛰️ Proximity monitor started for user 'default'")
 
     logger.info("🎯 Project Noir Cloud API ready for real-time requests")
 
