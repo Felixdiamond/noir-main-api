@@ -48,6 +48,8 @@ from location_memory import LocationMemoryManager
 from websocket_manager import connection_manager as websocket_manager
 from audio_processor import CloudAudioProcessor
 from utils import setup_logging, get_env_var
+from frame_buffer import frame_buffer
+from realtime_processor import RealTimeProcessor
 
 MODEL_NAME = "gemini-2.5-pro"  # SOTA model with enhanced thinking and reasoning
 
@@ -105,8 +107,11 @@ storage_client = storage.Client()
 bucket_name = get_env_var("CLOUD_STORAGE_BUCKET")
 
 # Service URLs
-YOLO_SERVICE_URL = get_env_var("YOLO_SERVICE_URL", default="http://yolo-detection:8000")
+YOLO_SERVICE_URL = get_env_var("YOLO_SERVICE_URL", default="https://noir-yolo-api-930930012707.us-central1.run.app")
 DEPTH_SERVICE_URL = get_env_var("DEPTH_SERVICE_URL", default="http://depth-estimation:8000")
+
+# Initialize real-time processor
+realtime_processor = RealTimeProcessor(YOLO_SERVICE_URL, DEPTH_SERVICE_URL)
 
 @app.on_event("startup")
 async def startup_event():
@@ -153,7 +158,20 @@ async def startup_event():
     except Exception as e:
         logger.error(f"❌ Cloud TTS connection failed: {e}")
     
-    logger.info("🎯 Project Noir Cloud API ready for requests")
+    # Start frame buffer cleanup task
+    asyncio.create_task(periodic_frame_cleanup())
+    logger.info("🧹 Frame buffer cleanup task started")
+    
+    logger.info("🎯 Project Noir Cloud API ready for real-time requests")
+
+async def periodic_frame_cleanup():
+    """Periodically clean up old frames from memory buffer"""
+    while True:
+        try:
+            await asyncio.sleep(30)  # Clean every 30 seconds
+            await frame_buffer.cleanup_old_frames()
+        except Exception as e:
+            logger.error(f"❌ Frame cleanup error: {e}")
 
 @app.get("/")
 async def root():
@@ -177,7 +195,7 @@ async def root():
 async def process_frame(request_data: dict):
     """
     Process camera frame from any device (JSON format)
-    Optimized for current hardware: ESP32-CAM + Mobile GPS
+    Optimized for real-time processing with in-memory buffer
     """
     try:
         user_id = request_data.get("user_id", "default")
@@ -192,11 +210,11 @@ async def process_frame(request_data: dict):
         
         logger.info(f"📸 Frame received from {device_id} for user {user_id}")
         
-        # Store frame in Cloud Storage for processing
-        blob_name = f"frames/{user_id}/{session_id}.jpg"
-        bucket = storage_client.bucket(bucket_name)
-        blob = bucket.blob(blob_name)
-        blob.upload_from_string(image_bytes, content_type='image/jpeg')
+        # Store frame in memory buffer for immediate processing
+        await frame_buffer.store_frame(user_id, image_bytes)
+        
+        # Optional: Store in Cloud Storage for backup (async, non-blocking)
+        asyncio.create_task(store_frame_backup(user_id, session_id, image_bytes))
         
         # Get latest GPS data from location manager (from mobile app)
         current_location = location_manager.get_current_location(user_id)
@@ -212,14 +230,15 @@ async def process_frame(request_data: dict):
                 "user_id": user_id,
                 "device_id": device_id,
                 "gps_available": current_location is not None,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": datetime.utcnow().isoformat(),
+                "processing_mode": "real_time"
             }
         })
         
         return {
             "success": True,
             "session_id": session_id,
-            "message": "Frame processed successfully",
+            "message": "Frame processed successfully (real-time mode)",
             "gps_available": current_location is not None
         }
         
@@ -372,8 +391,8 @@ async def process_command_intent(command_data: Dict, user_id: str) -> Dict:
         }
 
 async def handle_scene_description(user_id: str) -> Dict:
-    """Handle scene description request"""
-    # Get latest frame from storage
+    """Handle scene description request with parallel processing"""
+    # Get latest frame from memory buffer (real-time)
     latest_frame = await get_latest_frame(user_id)
     if not latest_frame:
         error_message = "No recent camera frame available for analysis."
@@ -384,19 +403,40 @@ async def handle_scene_description(user_id: str) -> Dict:
             "type": "scene_description"
         }
     
-    # Run YOLO object detection
-    async with httpx.AsyncClient(timeout=30.0) as client_http:
-        files = {"file": ("image.jpg", latest_frame, "image/jpeg")}
-        yolo_resp = await client_http.post(f"{YOLO_SERVICE_URL}/detect", files=files)
-        yolo_resp.raise_for_status()
-        yolo_data = yolo_resp.json()
+    # Run YOLO and Depth estimation in parallel (major speedup)
+    start_time = time.time()
+    
+    async def run_yolo():
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client_http:  # Reduced timeout
+                files = {"file": ("image.jpg", latest_frame, "image/jpeg")}
+                yolo_resp = await client_http.post(f"{YOLO_SERVICE_URL}/detect", files=files)
+                yolo_resp.raise_for_status()
+                return yolo_resp.json()
+        except Exception as e:
+            logger.error(f"❌ YOLO detection failed: {e}")
+            return {"detections": []}
+    
+    async def run_depth():
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client_http:  # Reduced timeout
+                files = {"file": ("image.jpg", latest_frame, "image/jpeg")}
+                depth_resp = await client_http.post(f"{DEPTH_SERVICE_URL}/estimate-depth", files=files, params={"return_colorized": True})
+                depth_resp.raise_for_status()
+                return depth_resp.json()
+        except Exception as e:
+            logger.error(f"❌ Depth estimation failed: {e}")
+            return {}
+    
+    # Execute both services in parallel
+    yolo_data, depth_data = await asyncio.gather(run_yolo(), run_depth())
+    
+    processing_time = time.time() - start_time
+    logger.info(f"⚡ Parallel processing completed in {processing_time:.2f}s")
+    
+    # Extract objects
     objects = [d.get("class_name") for d in yolo_data.get("detections", [])]
-    # Run depth estimation
-    async with httpx.AsyncClient(timeout=60.0) as client_http:
-        files = {"file": ("image.jpg", latest_frame, "image/jpeg")}
-        depth_resp = await client_http.post(f"{DEPTH_SERVICE_URL}/estimate-depth", files=files, params={"return_colorized": True})
-        depth_resp.raise_for_status()
-        depth_data = depth_resp.json()
+    
     # Build Gemini prompt with context
     system_prompt = (
         "You are Noir, an AI assistant for visually impaired users. "
@@ -410,6 +450,7 @@ async def handle_scene_description(user_id: str) -> Dict:
         max_d = depth_data.get("max_depth", 0)
         context_lines.append(f"Depth range: {min_d:.1f}m to {max_d:.1f}m")
     full_prompt = f"{system_prompt}\n\nContext:\n" + "\n".join(context_lines)
+    
     # Create image content and generate response
     image_content = create_inline_data_content(latest_frame, "image/jpeg")
     
@@ -421,13 +462,17 @@ async def handle_scene_description(user_id: str) -> Dict:
     # Extract text from response
     response_text = response.text if hasattr(response, 'text') else str(response)
     
-    # Convert to speech
+    # Convert to speech (async in background to not block response)
     audio_response = await text_to_speech(response_text)
+    
+    total_time = time.time() - start_time
+    logger.info(f"🎯 Complete scene description in {total_time:.2f}s")
     
     return {
         "message": response_text,
         "audio_url": audio_response,
-        "type": "scene_description"
+        "type": "scene_description",
+        "processing_time": total_time
     }
 
 async def handle_object_finding(user_id: str, object_name: str) -> Dict:
@@ -627,9 +672,26 @@ async def text_to_speech(text: str) -> str:
         return ""
 
 async def get_latest_frame(user_id: str):
-    """Get latest camera frame for processing"""
+    """Get latest camera frame for processing (real-time from memory buffer)"""
     try:
-        # Get the most recent frame from Cloud Storage
+        # Get frame from in-memory buffer (near-instant)
+        image_data = await frame_buffer.get_latest_frame(user_id)
+        
+        if image_data:
+            logger.info(f"📸 Retrieved real-time frame for user {user_id} ({len(image_data)} bytes)")
+            return image_data
+        
+        # Fallback to Cloud Storage only if no recent frame in memory
+        logger.info(f"⚠️ No recent frame in buffer, falling back to Cloud Storage for user {user_id}")
+        return await get_latest_frame_from_storage(user_id)
+        
+    except Exception as e:
+        logger.error(f"❌ Error retrieving latest frame for user {user_id}: {e}")
+        return None
+
+async def get_latest_frame_from_storage(user_id: str):
+    """Fallback: Get latest frame from Cloud Storage (legacy method)"""
+    try:
         bucket = storage_client.bucket(bucket_name)
         prefix = f"frames/{user_id}/"
         
@@ -640,11 +702,6 @@ async def get_latest_frame(user_id: str):
         
         if not blobs:
             logger.warning(f"No frames found for user {user_id} in bucket {bucket_name}")
-            # Also try to list all frames to debug
-            all_frames = list(bucket.list_blobs(prefix="frames/"))
-            logger.info(f"🗂️ Total frames in bucket: {len(all_frames)}")
-            if all_frames:
-                logger.info(f"📋 Sample frame names: {[blob.name for blob in all_frames[:5]]}")
             return None
         
         # Get the most recent blob (by name, which includes timestamp)
@@ -652,13 +709,24 @@ async def get_latest_frame(user_id: str):
         
         # Download the image data
         image_data = latest_blob.download_as_bytes()
-        logger.info(f"📸 Retrieved latest frame for user {user_id}: {latest_blob.name} ({len(image_data)} bytes)")
+        logger.info(f"📸 Retrieved latest frame from storage for user {user_id}: {latest_blob.name} ({len(image_data)} bytes)")
         
         return image_data
         
     except Exception as e:
-        logger.error(f"❌ Error retrieving latest frame for user {user_id}: {e}")
+        logger.error(f"❌ Error retrieving latest frame from storage for user {user_id}: {e}")
         return None
+
+async def store_frame_backup(user_id: str, session_id: str, image_bytes: bytes):
+    """Store frame backup to Cloud Storage (async, non-blocking)"""
+    try:
+        blob_name = f"frames/{user_id}/{session_id}.jpg"
+        bucket = storage_client.bucket(bucket_name)
+        blob = bucket.blob(blob_name)
+        blob.upload_from_string(image_bytes, content_type='image/jpeg')
+        logger.debug(f"☁️ Frame backup stored: {blob_name}")
+    except Exception as e:
+        logger.error(f"❌ Frame backup storage failed: {e}")
 
 # Spatial positioning and navigation utilities
 def calculate_object_position(bbox: dict, image_width: int, image_height: int) -> dict:
@@ -756,6 +824,15 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
     except Exception as e:
         logger.error(f"WebSocket error for user {user_id}: {e}")
         websocket_manager.disconnect(connection_id)
+
+@app.websocket("/realtime/{user_id}")
+async def realtime_processing_stream(websocket: WebSocket, user_id: str):
+    """
+    Real-time image processing WebSocket stream
+    Processes frames immediately as they arrive - ZERO DELAY
+    """
+    logger.info(f"🔴 Real-time processing stream requested for user {user_id}")
+    await realtime_processor.connect_stream(websocket, user_id)
 
 @app.get("/locations/{user_id}")
 async def get_user_locations(user_id: str):
