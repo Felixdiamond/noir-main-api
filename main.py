@@ -49,7 +49,6 @@ from websocket_manager import connection_manager as websocket_manager
 from audio_processor import CloudAudioProcessor
 from utils import setup_logging, get_env_var
 from frame_buffer import frame_buffer
-from realtime_http import RealTimeHTTPProcessor
 
 MODEL_NAME = "gemini-2.5-pro"  # SOTA model with enhanced thinking and reasoning
 
@@ -110,8 +109,6 @@ bucket_name = get_env_var("CLOUD_STORAGE_BUCKET")
 YOLO_SERVICE_URL = get_env_var("YOLO_SERVICE_URL", default="https://noir-yolo-api-930930012707.us-central1.run.app")
 DEPTH_SERVICE_URL = get_env_var("DEPTH_SERVICE_URL", default="http://depth-estimation:8000")
 
-# Initialize real-time HTTP processor (Cloud Run compatible)
-realtime_http_processor = RealTimeHTTPProcessor(YOLO_SERVICE_URL, DEPTH_SERVICE_URL)
 
 @app.on_event("startup")
 async def startup_event():
@@ -212,16 +209,23 @@ async def process_frame(request_data: dict):
         
         # Store frame in memory buffer for immediate processing
         await frame_buffer.store_frame(user_id, image_bytes)
-        
+
+        # Log buffer status after storing
+        try:
+            buffer_status = await frame_buffer.get_buffer_status(user_id)
+            logger.info(f"[BUFFER] User: {user_id} | Frames in buffer: {buffer_status['frames_count']} | Frame IDs: {buffer_status['frames']}")
+        except Exception as e:
+            logger.warning(f"[BUFFER] Could not retrieve buffer status for user {user_id}: {e}")
+
         # Optional: Store in Cloud Storage for backup (async, non-blocking)
         asyncio.create_task(store_frame_backup(user_id, session_id, image_bytes))
-        
+
         # Get latest GPS data from location manager (from mobile app)
         current_location = location_manager.get_current_location(user_id)
-        
+
         # Send to YOLO detection service (async)
         asyncio.create_task(send_to_yolo_service(image_bytes, session_id, current_location))
-        
+
         # Broadcast to connected WebSocket clients
         await websocket_manager.broadcast({
             "type": "frame_processed",
@@ -234,7 +238,7 @@ async def process_frame(request_data: dict):
                 "processing_mode": "real_time"
             }
         })
-        
+
         return {
             "success": True,
             "session_id": session_id,
@@ -246,36 +250,7 @@ async def process_frame(request_data: dict):
         logger.error(f"❌ Frame processing error: {e}")
         return {"success": False, "error": str(e)}
 
-@app.get("/get-latest-frame")
-async def get_latest_frame_endpoint(user_id: str = "default"):
-    """
-    Get the latest camera frame for a user
-    Used by MCP orchestrator for vision analysis
-    """
-    try:
-        # Get latest frame data
-        frame_data = await get_latest_frame(user_id)
-        
-        if frame_data:
-            # Convert to base64 for JSON response
-            image_base64 = base64.b64encode(frame_data).decode('utf-8')
-            
-            return {
-                "success": True,
-                "image_data": image_base64,
-                "user_id": user_id,
-                "timestamp": datetime.utcnow().isoformat()
-            }
-        else:
-            return {
-                "success": False,
-                "message": "No recent camera frame available",
-                "user_id": user_id
-            }
-            
-    except Exception as e:
-        logger.error(f"❌ Error retrieving frame for user {user_id}: {e}")
-        return {"success": False, "error": str(e)}
+
     
 @app.get("/gps/current")
 async def get_current_gps(user_id: str = "default"):
@@ -392,25 +367,39 @@ async def process_command_intent(command_data: Dict, user_id: str) -> Dict:
 
 async def handle_scene_description(user_id: str) -> Dict:
     """Handle scene description request with parallel processing"""
-    # Get latest frame from memory buffer (real-time ONLY)
-    latest_frame = await get_latest_frame(user_id)
-    if not latest_frame:
-        error_message = f"No recent camera frame available for user {user_id}. Make sure your ESP32 camera is connected and sending frames to the /frame endpoint."
+    # Get all frames from memory buffer (real-time ONLY)
+    try:
+        buffer_status = await frame_buffer.get_buffer_status(user_id)
+        frame_ids = buffer_status["frames"]
+        frames = []
+        for frame_id in frame_ids:
+            frame = await frame_buffer.get_frame(user_id, frame_id)
+            if frame:
+                frames.append(frame)
+    except Exception as e:
+        logger.error(f"❌ Error retrieving frames from buffer for user {user_id}: {e}")
+        frames = []
+
+    if not frames:
+        error_message = f"No recent camera frames available for user {user_id}. Make sure your ESP32 camera is connected and sending frames to the /frame endpoint."
         audio_response = await text_to_speech(error_message)
-        logger.error(f"❌ SCENE DESCRIPTION FAILED: No frame in buffer for user {user_id}")
+        logger.error(f"❌ SCENE DESCRIPTION FAILED: No frames in buffer for user {user_id}")
         return {
             "message": error_message,
             "audio_url": audio_response,
             "type": "scene_description",
             "error": "no_frame_available"
         }
-    
+
+    # Use the most recent frame for YOLO and depth, but pass all frames to Gemini
+    latest_frame = frames[-1]
+
     # Run YOLO and Depth estimation in parallel (major speedup)
     start_time = time.time()
-    
+
     async def run_yolo():
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client_http:  # Reduced timeout
+            async with httpx.AsyncClient(timeout=15.0) as client_http:
                 files = {"file": ("image.jpg", latest_frame, "image/jpeg")}
                 yolo_resp = await client_http.post(f"{YOLO_SERVICE_URL}/detect", files=files)
                 yolo_resp.raise_for_status()
@@ -418,10 +407,10 @@ async def handle_scene_description(user_id: str) -> Dict:
         except Exception as e:
             logger.error(f"❌ YOLO detection failed: {e}")
             return {"detections": []}
-    
+
     async def run_depth():
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client_http:  # Reduced timeout
+            async with httpx.AsyncClient(timeout=30.0) as client_http:
                 files = {"file": ("image.jpg", latest_frame, "image/jpeg")}
                 depth_resp = await client_http.post(f"{DEPTH_SERVICE_URL}/estimate-depth", files=files, params={"return_colorized": True})
                 depth_resp.raise_for_status()
@@ -429,16 +418,16 @@ async def handle_scene_description(user_id: str) -> Dict:
         except Exception as e:
             logger.error(f"❌ Depth estimation failed: {e}")
             return {}
-    
+
     # Execute both services in parallel
     yolo_data, depth_data = await asyncio.gather(run_yolo(), run_depth())
-    
+
     processing_time = time.time() - start_time
     logger.info(f"⚡ Parallel processing completed in {processing_time:.2f}s")
-    
+
     # Extract objects
     objects = [d.get("class_name") for d in yolo_data.get("detections", [])]
-    
+
     # Build Gemini prompt with context
     system_prompt = (
         "You are Noir, an AI assistant for visually impaired users. "
@@ -452,24 +441,25 @@ async def handle_scene_description(user_id: str) -> Dict:
         max_d = depth_data.get("max_depth", 0)
         context_lines.append(f"Depth range: {min_d:.1f}m to {max_d:.1f}m")
     full_prompt = f"{system_prompt}\n\nContext:\n" + "\n".join(context_lines)
-    
-    # Create image content and generate response
-    image_content = create_inline_data_content(latest_frame, "image/jpeg")
-    
+
+    # Create image content for all frames
+    image_contents = [create_inline_data_content(frame, "image/jpeg") for frame in frames]
+
+    # Pass all images to Gemini
     response = client.models.generate_content(
         model=MODEL_NAME,
-        contents=[full_prompt, image_content]
+        contents=[full_prompt] + image_contents
     )
-    
+
     # Extract text from response
     response_text = response.text if hasattr(response, 'text') else str(response)
-    
+
     # Convert to speech (async in background to not block response)
     audio_response = await text_to_speech(response_text)
-    
+
     total_time = time.time() - start_time
     logger.info(f"🎯 Complete scene description in {total_time:.2f}s")
-    
+
     return {
         "message": response_text,
         "audio_url": audio_response,
@@ -690,32 +680,6 @@ async def get_latest_frame(user_id: str):
         logger.error(f"❌ Error retrieving latest frame for user {user_id}: {e}")
         return None
 
-@app.get("/debug/frame-buffer/{user_id}")
-async def debug_frame_buffer(user_id: str):
-    """Debug endpoint to check what's in the frame buffer"""
-    try:
-        # Check if user has frame in buffer
-        frame_data = await frame_buffer.get_latest_frame(user_id)
-        
-        if frame_data:
-            return {
-                "success": True,
-                "user_id": user_id,
-                "frame_available": True,
-                "frame_size_bytes": len(frame_data),
-                "message": f"Frame available for user {user_id}"
-            }
-        else:
-            return {
-                "success": True,
-                "user_id": user_id,
-                "frame_available": False,
-                "message": f"No recent frame available for user {user_id}. Camera may not be sending frames."
-            }
-            
-    except Exception as e:
-        logger.error(f"❌ Debug frame buffer error: {e}")
-        return {"success": False, "error": str(e)}
 
 async def store_frame_backup(user_id: str, session_id: str, image_bytes: bytes):
     """Store frame backup to Cloud Storage (async, non-blocking)"""
@@ -825,41 +789,6 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
         logger.error(f"WebSocket error for user {user_id}: {e}")
         websocket_manager.disconnect(connection_id)
 
-@app.post("/realtime-process")
-async def realtime_process_http(request_data: dict):
-    """
-    Real-time image processing via HTTP (Cloud Run compatible)
-    Processes frames immediately and returns results - ZERO DELAY
-    """
-    try:
-        user_id = request_data.get("user_id", "user_001")
-        base64_image = request_data.get("image_data", "")
-        device_id = request_data.get("device_id", "unknown")
-        frame_count = request_data.get("frame_count", 0)
-        
-        if not base64_image:
-            return {"success": False, "error": "No image data provided"}
-        
-        # Decode base64 image
-        image_bytes = base64.b64decode(base64_image)
-        
-        logger.info(f"⚡ HTTP real-time processing request from {device_id} (frame {frame_count}) - {len(image_bytes)} bytes")
-        
-        # Store in frame buffer for other endpoints
-        await frame_buffer.store_frame(user_id, image_bytes)
-        
-        # Process immediately and return results
-        result = await realtime_http_processor.process_frame_immediate(user_id, image_bytes)
-        
-        # Add device info to response
-        result["device_id"] = device_id
-        result["frame_count"] = frame_count
-        
-        return result
-        
-    except Exception as e:
-        logger.error(f"❌ HTTP real-time processing error: {e}")
-        return {"success": False, "error": str(e)}
 
 @app.get("/locations/{user_id}")
 async def get_user_locations(user_id: str):
