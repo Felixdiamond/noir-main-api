@@ -119,5 +119,13 @@ class FrameBuffer:
                 if not self.frames[user_id]:
                     del self.frames[user_id]
 
+
 # Global frame buffer instance - rolling buffer of 3 frames
 frame_buffer = FrameBuffer(max_frames_per_user=3, max_age_seconds=10)
+
+# Periodic cleanup coroutine for use in FastAPI lifespan or background tasks
+async def periodic_frame_cleanup(interval: int = 5):
+    """Periodically clean up old frames from the buffer every `interval` seconds."""
+    while True:
+        await frame_buffer.cleanup_old_frames()
+        await asyncio.sleep(interval)
