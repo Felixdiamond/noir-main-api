@@ -49,7 +49,7 @@ from websocket_manager import connection_manager as websocket_manager
 from audio_processor import CloudAudioProcessor
 from utils import setup_logging, get_env_var
 from frame_buffer import frame_buffer
-from realtime_processor import RealTimeProcessor
+from realtime_http import RealTimeHTTPProcessor
 
 MODEL_NAME = "gemini-2.5-pro"  # SOTA model with enhanced thinking and reasoning
 
@@ -110,8 +110,8 @@ bucket_name = get_env_var("CLOUD_STORAGE_BUCKET")
 YOLO_SERVICE_URL = get_env_var("YOLO_SERVICE_URL", default="https://noir-yolo-api-930930012707.us-central1.run.app")
 DEPTH_SERVICE_URL = get_env_var("DEPTH_SERVICE_URL", default="http://depth-estimation:8000")
 
-# Initialize real-time processor
-realtime_processor = RealTimeProcessor(YOLO_SERVICE_URL, DEPTH_SERVICE_URL)
+# Initialize real-time HTTP processor (Cloud Run compatible)
+realtime_http_processor = RealTimeHTTPProcessor(YOLO_SERVICE_URL, DEPTH_SERVICE_URL)
 
 @app.on_event("startup")
 async def startup_event():
@@ -825,14 +825,41 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str):
         logger.error(f"WebSocket error for user {user_id}: {e}")
         websocket_manager.disconnect(connection_id)
 
-@app.websocket("/realtime/{user_id}")
-async def realtime_processing_stream(websocket: WebSocket, user_id: str):
+@app.post("/realtime-process")
+async def realtime_process_http(request_data: dict):
     """
-    Real-time image processing WebSocket stream
-    Processes frames immediately as they arrive - ZERO DELAY
+    Real-time image processing via HTTP (Cloud Run compatible)
+    Processes frames immediately and returns results - ZERO DELAY
     """
-    logger.info(f"🔴 Real-time processing stream requested for user {user_id}")
-    await realtime_processor.connect_stream(websocket, user_id)
+    try:
+        user_id = request_data.get("user_id", "user_001")
+        base64_image = request_data.get("image_data", "")
+        device_id = request_data.get("device_id", "unknown")
+        frame_count = request_data.get("frame_count", 0)
+        
+        if not base64_image:
+            return {"success": False, "error": "No image data provided"}
+        
+        # Decode base64 image
+        image_bytes = base64.b64decode(base64_image)
+        
+        logger.info(f"⚡ HTTP real-time processing request from {device_id} (frame {frame_count}) - {len(image_bytes)} bytes")
+        
+        # Store in frame buffer for other endpoints
+        await frame_buffer.store_frame(user_id, image_bytes)
+        
+        # Process immediately and return results
+        result = await realtime_http_processor.process_frame_immediate(user_id, image_bytes)
+        
+        # Add device info to response
+        result["device_id"] = device_id
+        result["frame_count"] = frame_count
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"❌ HTTP real-time processing error: {e}")
+        return {"success": False, "error": str(e)}
 
 @app.get("/locations/{user_id}")
 async def get_user_locations(user_id: str):
