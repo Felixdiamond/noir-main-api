@@ -634,9 +634,17 @@ async def get_latest_frame(user_id: str):
         prefix = f"frames/{user_id}/"
         
         # List blobs with the prefix, ordered by creation time
+        logger.info(f"🔍 Looking for frames with prefix: {prefix}")
         blobs = list(bucket.list_blobs(prefix=prefix))
+        logger.info(f"📁 Found {len(blobs)} blobs for user {user_id}")
+        
         if not blobs:
-            logger.warning(f"No frames found for user {user_id}")
+            logger.warning(f"No frames found for user {user_id} in bucket {bucket_name}")
+            # Also try to list all frames to debug
+            all_frames = list(bucket.list_blobs(prefix="frames/"))
+            logger.info(f"🗂️ Total frames in bucket: {len(all_frames)}")
+            if all_frames:
+                logger.info(f"📋 Sample frame names: {[blob.name for blob in all_frames[:5]]}")
             return None
         
         # Get the most recent blob (by name, which includes timestamp)
@@ -644,7 +652,7 @@ async def get_latest_frame(user_id: str):
         
         # Download the image data
         image_data = latest_blob.download_as_bytes()
-        logger.info(f"📸 Retrieved latest frame for user {user_id}: {latest_blob.name}")
+        logger.info(f"📸 Retrieved latest frame for user {user_id}: {latest_blob.name} ({len(image_data)} bytes)")
         
         return image_data
         
