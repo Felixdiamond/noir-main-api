@@ -29,7 +29,7 @@ MODEL_NAME = "gemini-2.5-pro" # Upgraded Model
 
 # --- Initialize Clients ---
 genai_client = genai.Client(vertexai=True, project=GCP_PROJECT_ID, location=GCP_REGION)
-location_manager = LocationMemoryManager(project_id=GCP_PROJECT_ID)
+location_manager = LocationMemoryManager()
 maps_client = googlemaps.Client(key=GOOGLE_MAPS_API_KEY)
 
 
