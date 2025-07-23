@@ -6,6 +6,7 @@ uvicorn[standard]
 
 # Google Cloud services
 google-cloud-aiplatform
+google-genai
 google-cloud-texttospeech
 google-cloud-speech
 google-cloud-firestore
@@ -39,4 +40,4 @@ fastmcp
 langchain-mcp-adapters
 
 # Google Maps
-google-maps-services-python
+googlemaps

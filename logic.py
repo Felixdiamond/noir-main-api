@@ -15,6 +15,7 @@ from frame_buffer import frame_buffer
 from location_memory import LocationMemoryManager
 import google.genai as genai
 import googlemaps
+from google.genai.types import Part
 
 logger = logging.getLogger(__name__)
 
@@ -50,11 +51,11 @@ async def get_frames(user_id: str) -> Dict:
 async def analyze_vision(user_id: str, frames: List[str], prompt: str) -> Dict:
     """Sends frames and a prompt to the Gemini vision model for analysis."""
     try:
-        image_contents = [{"inline_data": {"mime_type": "image/jpeg", "data": frame}} for frame in frames]
+        image_parts = [Part.from_data(data=base64.b64decode(frame), mime_type="image/jpeg") for frame in frames]
         
         response = genai_client.models.generate_content(
             model=MODEL_NAME,
-            contents=[prompt] + image_contents
+            contents=[prompt] + image_parts
         )
         return {"description": response.text}
     except Exception as e:
