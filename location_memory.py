@@ -3,16 +3,40 @@ Location Memory Manager for Project Noir Cloud
 Handles GPS location saving, retrieval, and navigation
 """
 
+
 import json
 import logging
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 from google.cloud import firestore
 from models import Location, GPSData
+from geopy.distance import geodesic
 
 logger = logging.getLogger(__name__)
 
 class LocationMemoryManager:
+    def get_nearby_location(self, user_id: str, latitude: float, longitude: float, radius_meters: float) -> Optional[Dict]:
+        """Return the first saved location within radius (meters) of the given point, or None if not found."""
+        locations = self.get_all_locations(user_id)
+        for loc in locations:
+            dist = self.calculate_distance(latitude, longitude, loc["latitude"], loc["longitude"])
+            if dist <= radius_meters:
+                loc = dict(loc)  # Copy to avoid mutating DB
+                loc["distance_meters"] = dist
+                return loc
+        return None
+
+    def get_all_nearby_locations(self, user_id: str, latitude: float, longitude: float, radius_meters: float) -> List[Dict]:
+        """Return all saved locations within radius (meters) of the given point."""
+        locations = self.get_all_locations(user_id)
+        result = []
+        for loc in locations:
+            dist = self.calculate_distance(latitude, longitude, loc["latitude"], loc["longitude"])
+            if dist <= radius_meters:
+                loc = dict(loc)
+                loc["distance_meters"] = dist
+                result.append(loc)
+        return result
     def __init__(self):
         """Initialize Firestore client for location storage"""
         try:
@@ -158,22 +182,8 @@ class LocationMemoryManager:
             return None
     
     def calculate_distance(self, lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-        """Calculate distance between two GPS coordinates in meters using Haversine formula"""
-        import math
-        
-        # Convert latitude and longitude from degrees to radians
-        lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
-        
-        # Haversine formula
-        dlat = lat2 - lat1
-        dlon = lon2 - lon1
-        a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2
-        c = 2 * math.asin(math.sqrt(a))
-        
-        # Radius of Earth in meters
-        r = 6371000
-        
-        return c * r
+        """Calculate distance between two GPS coordinates in meters using geopy.geodesic."""
+        return geodesic((lat1, lon1), (lat2, lon2)).meters
     
     def calculate_bearing(self, lat1: float, lon1: float, lat2: float, lon2: float) -> float:
         """Calculate bearing (direction) from point 1 to point 2 in degrees"""

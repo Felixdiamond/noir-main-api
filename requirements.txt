@@ -33,3 +33,10 @@ structlog
 # Production server
 gunicorn
 python-multipart
+
+# MCP
+fastmcp
+langchain-mcp-adapters
+
+# Google Maps
+google-maps-services-python
