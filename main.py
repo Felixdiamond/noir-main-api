@@ -392,15 +392,17 @@ async def process_command_intent(command_data: Dict, user_id: str) -> Dict:
 
 async def handle_scene_description(user_id: str) -> Dict:
     """Handle scene description request with parallel processing"""
-    # Get latest frame from memory buffer (real-time)
+    # Get latest frame from memory buffer (real-time ONLY)
     latest_frame = await get_latest_frame(user_id)
     if not latest_frame:
-        error_message = "No recent camera frame available for analysis."
+        error_message = f"No recent camera frame available for user {user_id}. Make sure your ESP32 camera is connected and sending frames to the /frame endpoint."
         audio_response = await text_to_speech(error_message)
+        logger.error(f"❌ SCENE DESCRIPTION FAILED: No frame in buffer for user {user_id}")
         return {
             "message": error_message,
             "audio_url": audio_response,
-            "type": "scene_description"
+            "type": "scene_description",
+            "error": "no_frame_available"
         }
     
     # Run YOLO and Depth estimation in parallel (major speedup)
@@ -672,50 +674,48 @@ async def text_to_speech(text: str) -> str:
         return ""
 
 async def get_latest_frame(user_id: str):
-    """Get latest camera frame for processing (real-time from memory buffer)"""
+    """Get latest camera frame for processing (ONLY from memory buffer - no fallbacks)"""
     try:
-        # Get frame from in-memory buffer (near-instant)
+        # Get frame from in-memory buffer ONLY
         image_data = await frame_buffer.get_latest_frame(user_id)
         
         if image_data:
             logger.info(f"📸 Retrieved real-time frame for user {user_id} ({len(image_data)} bytes)")
             return image_data
-        
-        # Fallback to Cloud Storage only if no recent frame in memory
-        logger.info(f"⚠️ No recent frame in buffer, falling back to Cloud Storage for user {user_id}")
-        return await get_latest_frame_from_storage(user_id)
+        else:
+            logger.warning(f"❌ NO RECENT FRAME AVAILABLE for user {user_id} - Camera may not be sending frames")
+            return None
         
     except Exception as e:
         logger.error(f"❌ Error retrieving latest frame for user {user_id}: {e}")
         return None
 
-async def get_latest_frame_from_storage(user_id: str):
-    """Fallback: Get latest frame from Cloud Storage (legacy method)"""
+@app.get("/debug/frame-buffer/{user_id}")
+async def debug_frame_buffer(user_id: str):
+    """Debug endpoint to check what's in the frame buffer"""
     try:
-        bucket = storage_client.bucket(bucket_name)
-        prefix = f"frames/{user_id}/"
+        # Check if user has frame in buffer
+        frame_data = await frame_buffer.get_latest_frame(user_id)
         
-        # List blobs with the prefix, ordered by creation time
-        logger.info(f"🔍 Looking for frames with prefix: {prefix}")
-        blobs = list(bucket.list_blobs(prefix=prefix))
-        logger.info(f"📁 Found {len(blobs)} blobs for user {user_id}")
-        
-        if not blobs:
-            logger.warning(f"No frames found for user {user_id} in bucket {bucket_name}")
-            return None
-        
-        # Get the most recent blob (by name, which includes timestamp)
-        latest_blob = sorted(blobs, key=lambda x: x.name, reverse=True)[0]
-        
-        # Download the image data
-        image_data = latest_blob.download_as_bytes()
-        logger.info(f"📸 Retrieved latest frame from storage for user {user_id}: {latest_blob.name} ({len(image_data)} bytes)")
-        
-        return image_data
-        
+        if frame_data:
+            return {
+                "success": True,
+                "user_id": user_id,
+                "frame_available": True,
+                "frame_size_bytes": len(frame_data),
+                "message": f"Frame available for user {user_id}"
+            }
+        else:
+            return {
+                "success": True,
+                "user_id": user_id,
+                "frame_available": False,
+                "message": f"No recent frame available for user {user_id}. Camera may not be sending frames."
+            }
+            
     except Exception as e:
-        logger.error(f"❌ Error retrieving latest frame from storage for user {user_id}: {e}")
-        return None
+        logger.error(f"❌ Debug frame buffer error: {e}")
+        return {"success": False, "error": str(e)}
 
 async def store_frame_backup(user_id: str, session_id: str, image_bytes: bytes):
     """Store frame backup to Cloud Storage (async, non-blocking)"""
